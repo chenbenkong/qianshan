@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>千山 · A Thousand Mountains</title>
+<meta name="description" content="一幅会呼吸的水墨山水。滚动，即是在山中行旅。">
+<meta name="theme-color" content="#f2eee5">
+<link rel="stylesheet" href="./style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f2eee5'/%3E%3Cpath d='M4 24 L13 9 L20 20 L24 15 L28 24 Z' fill='%23141719'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<canvas id="scene" aria-label="水墨山水实时渲染画面"></canvas>
+
+<div id="fallback" hidden>
+  <p>此作品需要 WebGL2 支持。请使用较新的浏览器打开。</p>
+</div>
+
+<header class="brand">
+  <span class="brand__zh">千山</span>
+  <span class="brand__rule"></span>
+  <span class="brand__en">A&nbsp;Thousand&nbsp;Mountains</span>
+</header>
+
+<aside class="seal" aria-hidden="true"><span>云深</span></aside>
+
+<main class="scroll-track">
+
+  <section class="verse verse--opening" data-verse>
+    <p class="verse__zh">千山鸟飞绝，<br>万径人踪灭。</p>
+    <p class="verse__zh">孤舟蓑笠翁，<br>独钓寒江雪。</p>
+    <cite class="verse__src">柳宗元 · 江雪</cite>
+  </section>
+
+  <section class="verse verse--right" data-verse>
+    <p class="verse__zh">空山新雨后，<br>天气晚来秋。</p>
+    <p class="verse__zh">明月松间照，<br>清泉石上流。</p>
+    <cite class="verse__src">王维 · 山居秋暝</cite>
+  </section>
+
+  <section class="verse verse--left" data-verse>
+    <p class="verse__zh">横看成岭侧成峰，<br>远近高低各不同。</p>
+    <p class="verse__zh">不识庐山真面目，<br>只缘身在此山中。</p>
+    <cite class="verse__src">苏轼 · 题西林壁</cite>
+  </section>
+
+  <section class="verse verse--closing" data-verse>
+    <p class="verse__zh">山光悦鸟性，<br>潭影空人心。</p>
+    <cite class="verse__src">常建 · 题破山寺后禅院</cite>
+  </section>
+
+</main>
+
+<button id="scroll-cue" type="button">
+  <span class="scroll-cue__label">向下</span>
+  <span class="scroll-cue__line"></span>
+</button>
+
+<div class="scroll-progress" aria-hidden="true"><span class="scroll-progress__bar"></span></div>
+
+<footer class="colophon">
+  <p>实时光线步进渲染 · 无贴图 · WebGL2</p>
+</footer>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
