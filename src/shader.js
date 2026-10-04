@@ -88,7 +88,7 @@ vec3 terrainNormal(vec3 p, float t) {
 
 float marchTerrain(vec3 ro, vec3 rd, float tMax, int budget) {
   float t = 0.12;
-  for (int i = 0; i < 180; i++) {
+  for (int i = 0; i < 240; i++) {
     if (i >= budget) break;
     float d = terrainD(ro + rd * t);
     float dt = max(0.0055 * t, d * 0.46);
@@ -100,16 +100,22 @@ float marchTerrain(vec3 ro, vec3 rd, float tMax, int budget) {
 }
 
 float mistDepth(vec3 ro, vec3 rd, float tMax) {
+  if (tMax <= 0.0) return 0.0;
+  float yEnd = ro.y + rd.y * tMax;
+  if (min(ro.y, yEnd) > 58.0) return 0.0;
+
   float acc = 0.0;
   float prev = 0.0;
-  for (int i = 1; i <= 20; i++) {
-    float f = float(i) / 20.0;
+  for (int i = 1; i <= 14; i++) {
+    float f = float(i) / 14.0;
     float t = tMax * f * f;
     float dt = t - prev;
     vec3 p = ro + rd * t;
     float band = 1.0 - smoothstep(6.0, 58.0, p.y);
-    float body = fbm3(p.xz * 0.0125 + vec2(uTime * 0.010, uTime * 0.004));
-    acc += band * smoothstep(0.26, 0.74, body) * dt;
+    if (band > 0.003) {
+      float body = fbm2(p.xz * 0.0125 + vec2(uTime * 0.010, uTime * 0.004));
+      acc += band * smoothstep(0.26, 0.74, body) * dt;
+    }
     prev = t;
   }
   return acc;
@@ -123,14 +129,14 @@ vec3 skyTone(vec3 rd) {
   col = mix(col, vec3(0.996, 0.994, 0.982), smoothstep(0.99930, 0.99972, disc));
   col = mix(col, vec3(0.886, 0.888, 0.878), smoothstep(0.99820, 0.99930, disc) * 0.50);
 
-  vec2 cuv = rd.xz / (rd.y + 0.34);
-  float wash = fbm3(cuv * 0.115 + vec2(uTime * 0.008, uTime * 0.003));
-  float streak = fbm2(cuv * vec2(0.055, 0.20) + vec2(uTime * 0.013, 0.0));
-  float above = smoothstep(0.008, 0.16, rd.y);
-  float lift = 1.0 - smoothstep(0.26, 0.78, rd.y);
-
-  col = mix(col, INK, smoothstep(0.42, 0.86, wash) * 0.17 * above * lift);
-  col = mix(col, INK, smoothstep(0.52, 0.92, streak) * 0.09 * above * lift);
+  float cloud = smoothstep(0.008, 0.16, rd.y) * (1.0 - smoothstep(0.26, 0.78, rd.y));
+  if (cloud > 0.004) {
+    vec2 cuv = rd.xz / (rd.y + 0.34);
+    float wash = fbm3(cuv * 0.115 + vec2(uTime * 0.008, uTime * 0.003));
+    float streak = fbm2(cuv * vec2(0.055, 0.20) + vec2(uTime * 0.013, 0.0));
+    col = mix(col, INK, smoothstep(0.42, 0.86, wash) * 0.17 * cloud);
+    col = mix(col, INK, smoothstep(0.52, 0.92, streak) * 0.09 * cloud);
+  }
   return col;
 }
 
@@ -237,32 +243,36 @@ void main() {
 
   if (rd.y < -0.0005 && ro.y > 0.0) {
     vec2 wp = ro.xz + rd.xz * tWater;
-    float ripple = fbm3(wp * 0.16 + vec2(uTime * 0.05, uTime * 0.021));
-    vec3 rr = normalize(reflect(rd, normalize(vec3(
-      (ripple - 0.5) * 0.15, 1.0, (fbm2(wp * 0.12) - 0.5) * 0.11))));
-
-    float rHit = marchTerrain(ro + vec3(0.0, 0.02, 0.0), rr, 240.0, int(uSteps * 0.42));
-
-    vec3 refl = skyTone(rr);
-    float rFade = 1.0;
-    if (rHit > 0.0) {
-      vec3 rp = ro + rr * rHit;
-      vec3 rn = terrainNormal(rp, rHit);
-      float rInk = inkTone(rp, rn, rr, rHit);
-      refl = mix(INK, PAPER, clamp(rInk * 0.94 + 0.06, 0.0, 1.0));
-      rFade = 1.0 - smoothstep(40.0, 240.0, rHit) * 0.88;
-    }
-
     float fres = pow(clamp(1.0 + rd.y, 0.0, 1.0), 2.2);
     float near = smoothstep(0.0, 18.0, tWater);
     float mid = smoothstep(18.0, 90.0, tWater);
+    float detail = 1.0 - smoothstep(70.0, 280.0, tWater);
 
-    float lines = smoothstep(0.93, 1.0, sin(wp.x * 0.030 + fbm3(wp * 0.042) * 3.0));
-    lines *= smoothstep(0.50, 0.78, fbm3(wp * vec2(0.014, 0.07) + 7.3));
-    lines *= smoothstep(2.5, 40.0, tWater) * (1.0 - smoothstep(70.0, 190.0, tWater) * 0.7);
+    vec3 refl = skyTone(rd);
+    float rFade = 0.0;
+    if (tWater < 340.0 && fres > 0.02) {
+      float ripple = fbm3(wp * 0.16 + vec2(uTime * 0.05, uTime * 0.021));
+      vec3 rr = normalize(reflect(rd, normalize(vec3(
+        (ripple - 0.5) * 0.15, 1.0, (fbm2(wp * 0.12) - 0.5) * 0.11))));
+      refl = skyTone(rr);
+      float rHit = marchTerrain(ro + vec3(0.0, 0.02, 0.0), rr, 240.0, int(uSteps * 0.42));
+      if (rHit > 0.0) {
+        vec3 rp = ro + rr * rHit;
+        vec3 rn = terrainNormal(rp, rHit);
+        float rInk = inkTone(rp, rn, rr, rHit);
+        refl = mix(INK, PAPER, clamp(rInk * 0.94 + 0.06, 0.0, 1.0));
+        rFade = 1.0 - smoothstep(40.0, 240.0, rHit) * 0.88;
+      }
+    }
 
-    float washInk = mix(0.012, 0.155, fres) + lines * 0.20;
-    washInk += smoothstep(0.93, 1.0, fbm2(wp * 0.05 + vec2(uTime * 0.02, 0.0))) * 0.035;
+    float washInk = mix(0.012, 0.155, fres);
+    if (detail > 0.01) {
+      float lines = smoothstep(0.93, 1.0, sin(wp.x * 0.030 + fbm3(wp * 0.042) * 3.0));
+      lines *= smoothstep(0.50, 0.78, fbm3(wp * vec2(0.014, 0.07) + 7.3));
+      lines *= smoothstep(2.5, 40.0, tWater) * (1.0 - smoothstep(70.0, 190.0, tWater) * 0.7);
+      washInk += lines * 0.20 * detail;
+      washInk += smoothstep(0.93, 1.0, fbm2(wp * 0.05 + vec2(uTime * 0.02, 0.0))) * 0.035 * detail;
+    }
 
     float surfaceInk = clamp(mix(washInk, 0.045 + 0.215 * fres, 0.68) * near
                            + fres * 0.15 * mid, 0.0, 1.0);
@@ -277,11 +287,13 @@ void main() {
 
   col = mix(col, INK, flockInk(ro, rd) * 0.85);
 
-  float front = fbm3(uv * 2.15 + vec2(0.0, -uReveal * 1.35) + 4.7);
-  float m = uReveal * 2.25 - front * 0.92;
-  float halo = smoothstep(-0.02, 0.14, m) * (1.0 - smoothstep(0.14, 0.40, m));
-  col = mix(col, INK, clamp(halo, 0.0, 1.0) * 0.55 * step(0.001, uReveal));
-  col = mix(PAPER, col, smoothstep(0.0, 0.26, m));
+  if (uReveal < 0.999) {
+    float front = fbm3(uv * 2.15 + vec2(0.0, -uReveal * 1.35) + 4.7);
+    float m = uReveal * 2.25 - front * 0.92;
+    float halo = smoothstep(-0.02, 0.14, m) * (1.0 - smoothstep(0.14, 0.40, m));
+    col = mix(col, INK, clamp(halo, 0.0, 1.0) * 0.55 * step(0.001, uReveal));
+    col = mix(PAPER, col, smoothstep(0.0, 0.26, m));
+  }
 
   float fibre = vnoise(vec2(frag.x * 0.72, frag.y * 0.055)) * 0.020
               + vnoise(vec2(frag.x * 0.048, frag.y * 0.80)) * 0.016;

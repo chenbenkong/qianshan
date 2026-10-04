@@ -56,24 +56,47 @@ for (const name of [
   uniforms[name] = gl.getUniformLocation(program, name);
 }
 
-const nativeScale = Math.min(window.devicePixelRatio || 1, 1.5);
+const dpr = window.devicePixelRatio || 1;
 const forced = new URLSearchParams(location.search).get("q");
 const PROFILES = {
-  high: { steps: 150, scale: Math.min(nativeScale, 2) },
-  medium: { steps: 96, scale: nativeScale },
-  low: { steps: 44, scale: Math.min(nativeScale, 0.8) },
+  high: { steps: 220, budget: 4.0e6 },
+  medium: { steps: 150, budget: 2.2e6 },
+  low: { steps: 84, budget: 0.8e6 },
 };
-const profile = PROFILES[forced] || null;
+const profile = PROFILES[forced] || { steps: 190, budget: 2.4e6 };
 
-let scale = profile ? profile.scale : nativeScale;
-let steps = profile ? profile.steps : 120;
-const minScale = profile ? profile.scale : 0.55;
-const maxScale = profile ? profile.scale : nativeScale;
-const minSteps = profile ? profile.steps : 34;
-const maxSteps = profile ? profile.steps : 120;
+const FLOOR_STEPS = 70;
+let steps = profile.steps;
+const maxSteps = profile.steps;
+let budget = profile.budget;
+let minScale = 0.45;
 let frameBudget = 16.7;
 
+const pinned = Number(new URLSearchParams(location.search).get("px"));
+if (pinned > 0) {
+  budget = pinned;
+  minScale = 1;
+}
+
+/**
+ * Resolution is chosen from a pixel budget rather than from devicePixelRatio.
+ *
+ * A 3200x2000 panel at 200% scaling reports dpr 2, and trusting that literally asks for
+ * 6.4 megapixels — which a laptop iGPU cannot shade at any useful step count, and which
+ * buys nothing, since the picture is upscaled by the compositor anyway. Bounding the
+ * internal buffer by total pixels keeps the cost identical on a 4K desktop and a laptop
+ * while still letting strong GPUs climb.
+ */
+function ceiling() {
+  return Math.max(
+    minScale,
+    Math.min(dpr * 1.25, Math.sqrt(budget / Math.max(1, window.innerWidth * window.innerHeight))),
+  );
+}
+
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+let scale = 1;
 
 function resize() {
   const w = Math.max(1, Math.round(window.innerWidth * scale));
@@ -83,7 +106,11 @@ function resize() {
     canvas.height = h;
   }
 }
-window.addEventListener("resize", resize, { passive: true });
+
+window.addEventListener("resize", () => {
+  scale = Math.min(scale, ceiling());
+  resize();
+}, { passive: true });
 
 /* ── 飞行 ─────────────────────────────────────── */
 
@@ -318,18 +345,19 @@ function frame(now) {
   clock += dt;
 
   frameBudget += (dt * 1000 - frameBudget) * 0.06;
+
   if (frameBudget > 26) {
+    if (steps > FLOOR_STEPS) steps = Math.max(FLOOR_STEPS, steps - 6);
     if (scale > minScale) {
-      scale = Math.max(minScale, scale - 0.06);
+      scale = Math.max(minScale, scale - 0.03);
       resize();
-    } else if (steps > minSteps) {
-      steps = Math.max(minSteps, steps - 8);
     }
   } else if (frameBudget < 13) {
-    if (steps < maxSteps) steps = Math.min(maxSteps, steps + 2);
-    else if (scale < maxScale) {
-      scale = Math.min(maxScale, scale + 0.02);
+    if (scale < ceiling()) {
+      scale = Math.min(ceiling(), scale + 0.02);
       resize();
+    } else if (steps < maxSteps) {
+      steps = Math.min(maxSteps, steps + 2);
     }
   }
 
@@ -364,6 +392,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+scale = ceiling() * 0.7;
 resize();
 refreshReadouts(0);
 requestAnimationFrame(frame);
