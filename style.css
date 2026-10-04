@@ -19,14 +19,10 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--serif-en);
-  overflow: hidden;
-  overscroll-behavior: none;
+  overflow-x: hidden;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  cursor: default;
 }
-
-.is-locked { cursor: none; }
 
 #scene {
   position: fixed;
@@ -36,7 +32,12 @@ body {
   height: 100dvh;
   display: block;
   z-index: 0;
-  touch-action: none;
+}
+
+#scroll-spacer {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
 }
 
 #fallback {
@@ -74,7 +75,7 @@ body {
 .brand::before,
 .colophon::before,
 #audio-toggle::before,
-#hint::before,
+#scroll-cue::before,
 #inscription::before {
   content: "";
   position: absolute;
@@ -134,95 +135,6 @@ body {
 
 .revealed .seal { opacity: 0.92; transform: rotate(-3deg) scale(1); }
 
-/* ── 准星 ─────────────────────────────────────── */
-
-#crosshair {
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  width: 5px;
-  height: 5px;
-  margin: -2.5px 0 0 -2.5px;
-  z-index: 18;
-  border-radius: 50%;
-  background: var(--ink);
-  opacity: 0.42;
-  pointer-events: none;
-}
-
-#crosshair[hidden] { display: none; }
-
-/* ── 操作提示 ─────────────────────────────────── */
-
-#hint {
-  position: fixed;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 24;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1.1rem;
-  padding: 2rem 2.6rem;
-  text-align: center;
-  transition: opacity 1s ease, transform 1.2s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-#hint.is-gone {
-  opacity: 0;
-  transform: translate(-50%, calc(-50% - 14px));
-  pointer-events: none;
-}
-
-.hint__title {
-  margin: 0;
-  font-family: var(--serif-zh);
-  font-size: 1.05rem;
-  letter-spacing: 0.42em;
-  text-indent: 0.42em;
-}
-
-.hint__keys {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: grid;
-  gap: 0.55rem;
-}
-
-.hint__keys li {
-  display: flex;
-  align-items: center;
-  gap: 0.42rem;
-  font-size: 0.68rem;
-  letter-spacing: 0.18em;
-  color: var(--ink-soft);
-}
-
-.hint__keys span { margin-left: 0.5rem; }
-
-kbd {
-  display: inline-grid;
-  place-items: center;
-  min-width: 1.7rem;
-  height: 1.7rem;
-  padding: 0 0.4rem;
-  border: 1px solid rgba(20, 23, 25, 0.24);
-  border-radius: 3px;
-  font-family: var(--serif-zh);
-  font-size: 0.66rem;
-  letter-spacing: 0;
-  color: var(--ink);
-}
-
-.hint__note {
-  margin: 0;
-  font-size: 0.62rem;
-  letter-spacing: 0.16em;
-  color: var(--ink-faint);
-}
-
 /* ── 题字 ─────────────────────────────────────── */
 
 #inscription {
@@ -236,13 +148,13 @@ kbd {
 }
 
 #inscription.is-in {
-  animation: inscription 15s ease forwards;
+  animation: inscription 16s ease forwards;
 }
 
 @keyframes inscription {
   0%   { opacity: 0; transform: translateY(calc(-50% + 10px)); }
-  9%   { opacity: 1; transform: translateY(-50%); }
-  84%  { opacity: 1; transform: translateY(-50%); }
+  8%   { opacity: 1; transform: translateY(-50%); }
+  85%  { opacity: 1; transform: translateY(-50%); }
   100% { opacity: 0; transform: translateY(calc(-50% - 8px)); }
 }
 
@@ -258,10 +170,64 @@ kbd {
 
 .inscription__src {
   margin: 0.7rem 0 0;
-  font-family: var(--serif-zh);
   font-size: clamp(0.62rem, 0.9vw, 0.72rem);
   letter-spacing: 0.24em;
   color: var(--ink-faint);
+}
+
+/* ── 引导 ─────────────────────────────────────── */
+
+#scroll-cue {
+  position: fixed;
+  left: 50%;
+  bottom: clamp(1.6rem, 4vh, 2.8rem);
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.6rem 1rem;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 1.4s ease 3s, color 0.4s ease;
+  font-family: var(--serif-zh);
+}
+
+.revealed #scroll-cue { opacity: 1; }
+#scroll-cue:hover { color: var(--ink); }
+
+.scroll-cue__label {
+  font-size: 0.7rem;
+  letter-spacing: 0.4em;
+  text-indent: 0.4em;
+}
+
+.scroll-cue__line {
+  width: 1px;
+  height: 2.6rem;
+  background: linear-gradient(var(--ink-faint), transparent);
+  position: relative;
+  overflow: hidden;
+}
+
+.scroll-cue__line::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto auto 0;
+  width: 1px;
+  height: 40%;
+  background: var(--ink);
+  animation: trickle 2.6s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+@keyframes trickle {
+  0%   { transform: translateY(-110%); opacity: 0; }
+  35%  { opacity: 1; }
+  100% { transform: translateY(260%); opacity: 0; }
 }
 
 /* ── 页脚 ─────────────────────────────────────── */
@@ -375,7 +341,6 @@ kbd {
   .audio-label { display: none; }
   #audio-toggle { padding: 0.5rem; }
   #inscription { left: 1.2rem; right: 1.2rem; max-width: none; }
-  #hint { padding: 1.4rem 1.6rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

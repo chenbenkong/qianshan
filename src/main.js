@@ -1,11 +1,10 @@
-import { VERT, FRAG } from "./shader.js";
+﻿import { VERT, FRAG } from "./shader.js";
 import { createScore } from "./audio.js";
 import { terrainH } from "./field.js";
 import { COUPLETS } from "./verses.js";
 
 const canvas = document.getElementById("scene");
-const hint = document.getElementById("hint");
-const crosshair = document.getElementById("crosshair");
+const spacer = document.getElementById("scroll-spacer");
 const odoOut = document.getElementById("odo");
 const inscription = document.getElementById("inscription");
 
@@ -65,7 +64,15 @@ const PROFILES = {
 };
 const profile = PROFILES[forced] || { steps: 190, budget: 2.4e6 };
 
-const FLOOR_STEPS = 70;
+/**
+ * Steps are a quality knob here, not a throttle.
+ *
+ * Measured on the target iGPU at a fixed resolution, 62 / 116 / 150 steps all ran at the
+ * same frame rate — the cost is per-pixel work unrelated to step count. So the floor sits
+ * at 80% of the profile: low step counts do not buy frames, but they do destroy the image,
+ * because rays grazing along a hillside cannot converge and overshoot whole ridges.
+ */
+const FLOOR_STEPS = Math.round(profile.steps * 0.8);
 let steps = profile.steps;
 const maxSteps = profile.steps;
 let budget = profile.budget;
@@ -78,23 +85,14 @@ if (pinned > 0) {
   minScale = 1;
 }
 
-/**
- * Resolution is chosen from a pixel budget rather than from devicePixelRatio.
- *
- * A 3200x2000 panel at 200% scaling reports dpr 2, and trusting that literally asks for
- * 6.4 megapixels — which a laptop iGPU cannot shade at any useful step count, and which
- * buys nothing, since the picture is upscaled by the compositor anyway. Bounding the
- * internal buffer by total pixels keeps the cost identical on a 4K desktop and a laptop
- * while still letting strong GPUs climb.
- */
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 function ceiling() {
   return Math.max(
     minScale,
     Math.min(dpr * 1.25, Math.sqrt(budget / Math.max(1, window.innerWidth * window.innerHeight))),
   );
 }
-
-const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 let scale = 1;
 
@@ -112,169 +110,114 @@ window.addEventListener("resize", () => {
   resize();
 }, { passive: true });
 
-/* ── 飞行 ─────────────────────────────────────── */
+/* ── 无限行旅 ─────────────────────────────────── */
 
-const cam = { x: 0, y: 46, z: 150, yaw: 0.06, pitch: -0.10 };
-const vel = { x: 0, y: 0, z: 0 };
-const keys = new Set();
-let locked = false;
-let lastInput = performance.now();
+/**
+ * The scrollbar is not a position, it is a throttle.
+ *
+ * The page is a six-screen spacer. Scrolling accumulates the delta into `virtual`, then
+ * the scroll position is snapped back to the middle. Because the shader and the odometer
+ * both read `virtual`, the snap is invisible — the bar sits still while the mountains
+ * keep going.
+ */
+let scrollSpan = 1;
+let virtual = 0;
+let lastY = 0;
+let travel = 0;
 
-const CLEARANCE = 3.0;
-const FLOOR = 1.6;
-const SPEED = 74;
-const BOOST = 3.1;
-
-let travelled = 0;
-let lastOdo = -1;
-let lastVerse = -1;
-
-function markInput() {
-  lastInput = performance.now();
+function layout() {
+  scrollSpan = Math.max(1, window.innerHeight * 6);
+  spacer.style.height = `${scrollSpan}px`;
+  lastY = window.scrollY;
 }
 
-function basis() {
-  const cp = Math.cos(cam.pitch);
-  const sp = Math.sin(cam.pitch);
-  const cy = Math.cos(cam.yaw);
-  const sy = Math.sin(cam.yaw);
-  const fwd = { x: sy * cp, y: sp, z: -cy * cp };
-  const right = { x: cy, y: 0, z: sy };
-  const up = {
-    x: right.y * fwd.z - right.z * fwd.y,
-    y: right.z * fwd.x - right.x * fwd.z,
-    z: right.x * fwd.y - right.y * fwd.x,
-  };
-  return { fwd, right, up };
+function center() {
+  const mid = scrollSpan * 0.5;
+  window.scrollTo(0, mid);
+  lastY = mid;
 }
 
-function step(dt, now) {
-  const idle = now - lastInput > 2600 && !locked;
-  const b = basis();
-
-  const wish = { x: 0, y: 0, z: 0 };
-  if (keys.has("KeyW") || keys.has("ArrowUp")) { wish.x += b.fwd.x; wish.y += b.fwd.y; wish.z += b.fwd.z; }
-  if (keys.has("KeyS") || keys.has("ArrowDown")) { wish.x -= b.fwd.x; wish.y -= b.fwd.y; wish.z -= b.fwd.z; }
-  if (keys.has("KeyD") || keys.has("ArrowRight")) { wish.x += b.right.x; wish.z += b.right.z; }
-  if (keys.has("KeyA") || keys.has("ArrowLeft")) { wish.x -= b.right.x; wish.z -= b.right.z; }
-  if (keys.has("Space")) wish.y += 1;
-  if (keys.has("ShiftLeft") || keys.has("ShiftRight")) wish.y -= 1;
-
-  const mag = Math.hypot(wish.x, wish.y, wish.z);
-  const boost = keys.has("Space") || keys.has("ShiftLeft") || keys.has("ShiftRight") ? BOOST : 1;
-
-  if (mag > 0.001) {
-    wish.x /= mag; wish.y /= mag; wish.z /= mag;
-    const target = SPEED * boost;
-    vel.x += wish.x * target * 5.5 * dt;
-    vel.y += wish.y * target * 5.5 * dt;
-    vel.z += wish.z * target * 5.5 * dt;
-  }
-
-  const damp = Math.pow(mag > 0.001 ? 0.42 : 0.02, dt);
-  vel.x *= damp; vel.y *= damp; vel.z *= damp;
-
-  if (idle) {
-    const drift = reduceMotion ? 0 : 11;
-    vel.x += b.fwd.x * drift * dt;
-    vel.y += b.fwd.y * drift * dt;
-    vel.z += b.fwd.z * drift * dt;
-    cam.yaw += Math.sin(now * 0.00006) * 0.00016;
-    cam.pitch = Math.sin(now * 0.000041) * 0.035 - 0.02;
-    lastInput = now - 1200;
-  }
-
-  cam.x += vel.x * dt;
-  cam.y += vel.y * dt;
-  cam.z += vel.z * dt;
-
-  const RING = 7.5;
-  let floor = Math.max(FLOOR, terrainH(cam.x, cam.z) + CLEARANCE);
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2;
-    const h = terrainH(cam.x + Math.cos(a) * RING, cam.z + Math.sin(a) * RING) + CLEARANCE;
-    if (h > floor) floor = h;
-  }
-  if (cam.y < floor) {
-    cam.y = floor;
-    if (vel.y < 0) vel.y = 0;
-  }
-  if (cam.y > 240) {
-    cam.y = 240;
-    if (vel.y > 0) vel.y = 0;
-  }
+function onScroll() {
+  const y = window.scrollY;
+  virtual += y - lastY;
+  lastY = y;
+  if (virtual < 0) virtual = 0;
+  if (y < scrollSpan * 0.2 || y > scrollSpan * 0.8) center();
 }
 
-canvas.addEventListener("click", () => {
-  if (!locked) canvas.requestPointerLock?.();
-});
+window.addEventListener("scroll", onScroll, { passive: true });
 
-document.addEventListener("pointerlockchange", () => {
-  locked = document.pointerLockElement === canvas;
-  document.body.classList.toggle("is-locked", locked);
-  crosshair.hidden = !locked;
-  if (locked) {
-    markInput();
-    hint.classList.add("is-gone");
-  }
-});
+/* ── 镜头 ─────────────────────────────────────── */
 
-document.addEventListener("mousemove", (e) => {
-  if (!locked) return;
-  const sens = 0.0022;
-  cam.yaw += e.movementX * sens;
-  cam.pitch -= e.movementY * sens;
-  cam.pitch = Math.max(-1.45, Math.min(1.45, cam.pitch));
-  markInput();
-});
+const cam = { x: 0, y: 30, z: 0 };
+const basis = { fwd: { x: 0, y: 0, z: -1 }, right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 } };
 
-window.addEventListener("keydown", (e) => {
-  if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
-    e.preventDefault();
-  }
-  keys.add(e.code);
-  markInput();
-});
-window.addEventListener("keyup", (e) => keys.delete(e.code));
-window.addEventListener("blur", () => keys.clear());
+/**
+ * Routes the camera along bays and shorelines instead of into headlands.
+ *
+ * A low camera gives the composition that works — horizon in the lower third, peaks
+ * towering, mist pooling in the valleys — but a straight -z path ploughs into a range
+ * every so often and fills the frame with rock. Rather than climb above the terrain (which
+ * puts the eye over the cloud deck, so everything reads as white), the route is steered
+ * laterally toward whichever side has lower ground ahead. The corridor average is sampled
+ * over a 700-unit lookahead, so the decision is made well before the obstruction.
+ */
+function corridor(x, z) {
+  let sum = 0;
+  for (let d = 100; d <= 700; d += 100) sum += terrainH(x, z - d);
+  return sum / 7;
+}
 
-let touchLook = null;
-let touchYaw = 0;
-let touchPitch = 0;
-canvas.addEventListener(
-  "touchstart",
-  (e) => {
-    touchLook = { id: e.changedTouches[0].identifier, x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
-    touchYaw = cam.yaw;
-    touchPitch = cam.pitch;
-    hint.classList.add("is-gone");
-    markInput();
-  },
-  { passive: true },
-);
-canvas.addEventListener(
-  "touchmove",
-  (e) => {
-    if (!touchLook) return;
-    const t = Array.from(e.changedTouches).find((x) => x.identifier === touchLook.id);
-    if (!t) return;
-    cam.yaw = touchYaw + (t.clientX - touchLook.x) * 0.005;
-    cam.pitch = Math.max(-1.45, Math.min(1.45, touchPitch - (t.clientY - touchLook.y) * 0.005));
-    markInput();
-  },
-  { passive: true },
-);
-canvas.addEventListener("touchend", () => { touchLook = null; }, { passive: true });
+let guideX = 0;
+
+function placeCamera(clock, dt) {
+  const bobY = Math.sin(clock * 0.21) * 0.5 + Math.sin(clock * 0.083) * 0.9;
+  const bobX = Math.sin(clock * 0.147) * 0.8;
+
+  cam.z = -travel;
+
+  const left = corridor(cam.x - 95, cam.z);
+  const right = corridor(cam.x + 95, cam.z);
+  const bias = Math.max(-1, Math.min(1, (left - right) / 26));
+  guideX += bias * 34 * dt - guideX * 0.05 * dt;
+  guideX = Math.max(-190, Math.min(190, guideX));
+
+  cam.x = guideX + bobX;
+  cam.y = 17 + Math.sin(travel * 0.0052) * 6 + bobY;
+
+  const floor = terrainH(cam.x, cam.z) + 7.0;
+  if (cam.y < floor) cam.y = floor;
+
+  const yaw = Math.sin(travel * 0.0037) * 0.15 + Math.sin(clock * 0.043) * 0.045;
+  const pitch = 0.075 + Math.sin(travel * 0.0043) * 0.04 + Math.sin(clock * 0.031) * 0.010;
+
+  const cp = Math.cos(pitch);
+  const cy = Math.cos(yaw);
+  const sy = Math.sin(yaw);
+
+  basis.fwd.x = sy * cp;
+  basis.fwd.y = Math.sin(pitch);
+  basis.fwd.z = -cy * cp;
+  basis.right.x = cy;
+  basis.right.y = 0;
+  basis.right.z = sy;
+  basis.up.x = basis.right.y * basis.fwd.z - basis.right.z * basis.fwd.y;
+  basis.up.y = basis.right.z * basis.fwd.x - basis.right.x * basis.fwd.z;
+  basis.up.z = basis.right.x * basis.fwd.y - basis.right.y * basis.fwd.x;
+}
 
 /* ── 里程与题字 ───────────────────────────────── */
 
+let lastOdo = -1;
+let lastVerse = -1;
+
 function refreshReadouts(speed) {
-  const odo = Math.floor(travelled * 0.5);
+  const odo = Math.floor(travel * 0.5);
   if (odo !== lastOdo) {
     lastOdo = odo;
     odoOut.textContent = odo.toLocaleString("en-US");
   }
-  const vi = Math.floor(travelled / 620);
+  const vi = Math.floor(travel / 620);
   if (vi !== lastVerse) {
     lastVerse = vi;
     const c = COUPLETS[vi % COUPLETS.length];
@@ -333,11 +276,12 @@ if (stored !== "off") {
   }
 }
 
-/* ── 乐声 ─────────────────────────────────────── */
+/* ── 主循环 ───────────────────────────────────── */
 
 const introStarted = performance.now();
 let last = performance.now();
 let clock = 0;
+let speed = 0;
 
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
@@ -345,7 +289,6 @@ function frame(now) {
   clock += dt;
 
   frameBudget += (dt * 1000 - frameBudget) * 0.06;
-
   if (frameBudget > 26) {
     if (steps > FLOOR_STEPS) steps = Math.max(FLOOR_STEPS, steps - 6);
     if (scale > minScale) {
@@ -361,21 +304,22 @@ function frame(now) {
     }
   }
 
-  step(dt, now);
+  const target = virtual * 0.55;
+  const before = travel;
+  travel += (target - travel) * (reduceMotion ? 1 : 1 - Math.pow(0.0022, dt));
+  speed = Math.abs(travel - before) / Math.max(dt, 1e-4);
 
-  const speed = Math.hypot(vel.x, vel.y, vel.z);
-  travelled += speed * dt;
+  placeCamera(clock, dt);
 
-  const b = basis();
   const reveal = reduceMotion ? 1 : Math.min(1, (now - introStarted) / 3400);
 
   gl.viewport(0, 0, canvas.width, canvas.height);
   gl.uniform2f(uniforms.uRes, canvas.width, canvas.height);
   gl.uniform1f(uniforms.uTime, clock);
   gl.uniform3f(uniforms.uCamPos, cam.x, cam.y, cam.z);
-  gl.uniform3f(uniforms.uCamRight, b.right.x, b.right.y, b.right.z);
-  gl.uniform3f(uniforms.uCamUp, b.up.x, b.up.y, b.up.z);
-  gl.uniform3f(uniforms.uCamFwd, b.fwd.x, b.fwd.y, b.fwd.z);
+  gl.uniform3f(uniforms.uCamRight, basis.right.x, basis.right.y, basis.right.z);
+  gl.uniform3f(uniforms.uCamUp, basis.up.x, basis.up.y, basis.up.z);
+  gl.uniform3f(uniforms.uCamFwd, basis.fwd.x, basis.fwd.y, basis.fwd.z);
   gl.uniform1f(uniforms.uSpeed, speed);
   gl.uniform1f(uniforms.uReveal, reveal);
   gl.uniform1f(uniforms.uSteps, steps);
@@ -386,13 +330,21 @@ function frame(now) {
     document.body.classList.add("revealed");
   }
 
+
   refreshReadouts(speed);
   if (score.playing) score.setElevation(Math.max(0, Math.min(1, (cam.y - 20) / 320)));
 
   requestAnimationFrame(frame);
 }
 
+layout();
 scale = ceiling() * 0.7;
 resize();
+virtual = 0;
+center();
 refreshReadouts(0);
 requestAnimationFrame(frame);
+
+document.getElementById("scroll-cue")?.addEventListener("click", () => {
+  window.scrollBy({ top: window.innerHeight * 0.9, behavior: "smooth" });
+});

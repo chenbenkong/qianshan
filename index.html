@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>千山 · A Thousand Mountains</title>
-<meta name="description" content="可以自由穿行的水墨山水。实时光线步进渲染,无贴图、无外部资源。">
+<meta name="description" content="可以一路向下走的水墨山水。滚动即是行旅,没有尽头。">
 <meta name="theme-color" content="#f2eee5">
 <link rel="stylesheet" href="./style.css">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f2eee5'/%3E%3Cpath d='M4 24 L13 9 L20 20 L24 15 L28 24 Z' fill='%23141719'/%3E%3C/svg%3E">
 </head>
 <body>
 
-<canvas id="scene" aria-label="可自由穿行的水墨山水"></canvas>
+<canvas id="scene" aria-label="水墨山水实时渲染画面"></canvas>
 
 <div id="fallback" hidden>
   <p>此作品需要 WebGL2 支持。请使用较新的浏览器打开。</p>
@@ -25,23 +25,15 @@
 
 <aside class="seal" aria-hidden="true"><span>云深</span></aside>
 
-<div id="crosshair" hidden aria-hidden="true"></div>
-
-<div id="hint">
-  <p class="hint__title">点击进入</p>
-  <ul class="hint__keys">
-    <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd><span>前后左右</span></li>
-    <li><kbd>空格</kbd><kbd>Shift</kbd><span>升降</span></li>
-    <li><kbd>鼠标</kbd><span>转向</span></li>
-    <li><kbd>Esc</kbd><span>退出</span></li>
-  </ul>
-  <p class="hint__note">触屏:单指拖动转向,静止时自行前行</p>
-</div>
-
 <div id="inscription">
   <p class="inscription__line"></p>
   <p class="inscription__src"></p>
 </div>
+
+<button id="scroll-cue" type="button" aria-label="开始行旅">
+  <span class="scroll-cue__label">向下</span>
+  <span class="scroll-cue__line"></span>
+</button>
 
 <footer class="colophon">
   <p class="colophon__tech">实时光线步进渲染 · 无贴图 · WebGL2</p>
@@ -52,6 +44,8 @@
   <span class="audio-glyph" aria-hidden="true"></span>
   <span class="audio-label">乐声</span>
 </button>
+
+<div id="scroll-spacer" aria-hidden="true"></div>
 
 <script type="module" src="./src/main.js"></script>
 </body>
