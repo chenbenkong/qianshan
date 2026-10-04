@@ -34,6 +34,12 @@ body {
   z-index: 0;
 }
 
+#scroll-spacer {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+
 #fallback {
   position: fixed;
   inset: 0;
@@ -68,7 +74,8 @@ body {
 
 .brand::before,
 .colophon::before,
-#scroll-cue::before {
+#scroll-cue::before,
+#audio-toggle::before {
   content: "";
   position: absolute;
   inset: -2.2rem -3.4rem;
@@ -116,7 +123,6 @@ body {
   font-family: var(--serif-zh);
   font-size: 0.86rem;
   line-height: 1.05;
-  letter-spacing: 0;
   writing-mode: vertical-rl;
   border-radius: 2px;
   box-shadow: 0 1px 0 rgba(0, 0, 0, 0.12);
@@ -128,40 +134,32 @@ body {
 
 .revealed .seal { opacity: 0.92; transform: rotate(-3deg) scale(1); }
 
-/* ── 滚动轨道与诗文 ───────────────────────────── */
+/* ── 诗文层 ───────────────────────────────────── */
 
-.scroll-track {
-  position: relative;
+.verse-layer {
+  position: fixed;
+  inset: 0;
   z-index: 10;
   pointer-events: none;
+  overflow: hidden;
 }
 
 .verse {
-  min-height: 100vh;
-  min-height: 100dvh;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
   display: flex;
   flex-direction: column;
   justify-content: center;
   gap: 0.2rem;
   padding: 12vh clamp(1.5rem, 9vw, 11rem);
-  opacity: 0;
-  transform: translateY(26px);
-  transition: opacity 2s ease, transform 2.4s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform, opacity;
 }
-
-.verse.is-visible { opacity: 1; transform: none; }
-
-.verse--opening { padding-top: 4vh; }
 
 .verse--right {
   align-items: flex-end;
   text-align: right;
-}
-
-.verse--closing {
-  min-height: 78vh;
-  justify-content: flex-end;
-  padding-bottom: 16vh;
 }
 
 .verse__zh {
@@ -183,7 +181,7 @@ body {
   font-style: normal;
 }
 
-/* ── 引导与进度 ───────────────────────────────── */
+/* ── 引导、进度、乐声 ─────────────────────────── */
 
 #scroll-cue {
   position: fixed;
@@ -254,6 +252,78 @@ body {
   background: var(--ink);
   transform-origin: 0 50%;
   transform: scaleX(0);
+  opacity: 0.55;
+}
+
+#audio-toggle {
+  position: fixed;
+  right: clamp(1.5rem, 4vw, 3.5rem);
+  top: clamp(1.5rem, 4vh, 3rem);
+  z-index: 22;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid rgba(20, 23, 25, 0.18);
+  border-radius: 999px;
+  background: none;
+  color: var(--ink-soft);
+  cursor: pointer;
+  font-family: var(--serif-zh);
+  font-size: 0.68rem;
+  letter-spacing: 0.24em;
+  text-indent: 0.24em;
+  opacity: 0;
+  transition: opacity 1.6s ease 2s, color 0.35s ease, border-color 0.35s ease;
+}
+
+.revealed #audio-toggle { opacity: 1; }
+#audio-toggle:hover { color: var(--ink); border-color: rgba(20, 23, 25, 0.42); }
+#audio-toggle.is-on { color: var(--ink); border-color: rgba(20, 23, 25, 0.38); }
+
+.audio-glyph {
+  width: 1.5rem;
+  height: 1.5rem;
+  display: block;
+  position: relative;
+}
+
+.audio-glyph::before {
+  content: "";
+  position: absolute;
+  left: 0.16rem;
+  top: 50%;
+  width: 0.24rem;
+  height: 0.24rem;
+  margin-top: -0.12rem;
+  background: currentColor;
+  border-radius: 50%;
+}
+
+.audio-glyph::after {
+  content: "";
+  position: absolute;
+  left: 0.44rem;
+  top: 50%;
+  width: 0.72rem;
+  height: 0.72rem;
+  margin-top: -0.36rem;
+  border: 1px solid currentColor;
+  border-left-color: transparent;
+  border-bottom-color: transparent;
+  border-radius: 50%;
+  transform: rotate(-45deg);
+  opacity: 0.28;
+}
+
+.is-on .audio-glyph::after {
+  animation: pulse 2.4s ease-in-out infinite;
+  opacity: 0.85;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: rotate(-45deg) scale(0.86); opacity: 0.45; }
+  50%      { transform: rotate(-45deg) scale(1.12); opacity: 0.95; }
 }
 
 /* ── 页脚 ─────────────────────────────────────── */
@@ -278,12 +348,23 @@ body {
   color: var(--ink-faint);
 }
 
+.colophon__odo {
+  margin-top: 0.35rem !important;
+  font-family: var(--serif-zh);
+  text-transform: none;
+  letter-spacing: 0.2em;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── 窄屏 ─────────────────────────────────────── */
 
 @media (max-width: 720px) {
   .verse { padding: 12vh 1.6rem; }
   .verse--right { align-items: flex-start; text-align: left; }
   .colophon { display: none; }
+  .audio-label { display: none; }
+  #audio-toggle { padding: 0.5rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -291,7 +372,8 @@ body {
   .brand,
   .seal,
   #scroll-cue,
-  .colophon { transition-duration: 0.01ms; }
-  .scroll-cue__line::after { animation: none; }
-  .verse { opacity: 1; transform: none; }
+  .colophon,
+  #audio-toggle { transition-duration: 0.01ms; }
+  .scroll-cue__line::after,
+  .is-on .audio-glyph::after { animation: none; }
 }

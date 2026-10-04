@@ -213,14 +213,12 @@ void main() {
   float bobX = sin(uTime * 0.21) * 1.1 + sin(uTime * 0.077) * 2.4;
   float bobY = sin(uTime * 0.163 + 1.2) * 0.30 + sin(uTime * 0.31) * 0.10;
 
-  vec3 ro = vec3(
-    bobX + sin(uTravel * 0.055) * 26.0,
-    12.0 + bobY + uTravel * 0.040,
-    -uTravel
-  );
+  float climb = 17.0 + sin(uTravel * 0.0055) * 8.0;
+  float sway = sin(uTravel * 0.0021) * 34.0;
+  vec3 ro = vec3(bobX + sway, climb + bobY, -uTravel);
   float yaw = (uPointer.x - 0.5) * 0.26 + sin(uTime * 0.043) * 0.065
-            + sin(uTravel * 0.021) * 0.10;
-  float pitch = -(uPointer.y - 0.5) * 0.13 + 0.090 - uTravel * 0.0009;
+            + sin(uTravel * 0.0037) * 0.17;
+  float pitch = -(uPointer.y - 0.5) * 0.13 + 0.085 + sin(uTravel * 0.0043) * 0.048;
   vec3 fwd = normalize(vec3(sin(yaw) * cos(pitch), sin(pitch), -cos(yaw) * cos(pitch)));
   vec3 right = normalize(cross(vec3(0.0, 1.0, 0.0), fwd));
   vec3 up = cross(fwd, right);
