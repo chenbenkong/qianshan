@@ -1,31 +1,26 @@
 export const VERT = `#version 300 es
 precision highp float;
 const vec2 CORNERS[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+out vec2 vUv;
 void main() {
   vec2 p = CORNERS[gl_VertexID];
+  vUv = p * 0.5 + 0.5;
   gl_Position = vec4(p, 0.0, 1.0);
 }`;
 
-export const FRAG = `#version 300 es
+/**
+ * Curl of a slowly drifting noise potential, written to a small texture.
+ *
+ * Evaluating this per simulation pixel would cost four fbm taps each, so it is baked into
+ * a low-resolution field and sampled. Incompressible swirl is what makes ink creep along
+ * paper fibres instead of expanding in perfect circles.
+ */
+export const FLOW = `#version 300 es
 precision highp float;
-
+in vec2 vUv;
 out vec4 fragColor;
-
-uniform vec2  uRes;
 uniform float uTime;
-uniform vec3  uCamPos;
-uniform vec3  uCamRight;
-uniform vec3  uCamUp;
-uniform vec3  uCamFwd;
-uniform float uSpeed;
-uniform float uReveal;
-uniform float uSteps;
-uniform float uFar;
-
-const vec3  PAPER    = vec3(0.951, 0.937, 0.906);
-const vec3  INK      = vec3(0.063, 0.075, 0.094);
-const vec3  CINNABAR = vec3(0.639, 0.176, 0.149);
-const vec3  MOON_DIR = vec3(0.4320, 0.3071, -0.8487);
+uniform vec2 uScale;
 
 float hash21(vec2 p) {
   p = fract(p * vec2(127.1, 311.7));
@@ -44,267 +39,207 @@ float vnoise(vec2 p) {
   return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-float fbm2(vec2 p) {
-  return (vnoise(p) * 0.5 + vnoise(p * 2.03 + 11.7) * 0.25) / 0.75;
-}
-
-float fbm3(vec2 p) {
-  return (vnoise(p) * 0.5 + vnoise(p * 2.03 + 11.7) * 0.25
-        + vnoise(p * 4.11 + 23.4) * 0.125) / 0.875;
-}
-
-float ridged3(vec2 p, float sharp) {
-  float sum = 0.0;
-  float amp = 0.5;
-  float freq = 1.0;
-  float weight = 1.0;
-  for (int i = 0; i < 3; i++) {
-    float n = 1.0 - abs(vnoise(p * freq) * 2.0 - 1.0);
-    n = pow(n, sharp);
-    sum += n * amp * weight;
-    weight = clamp(n * weight * 1.4, 0.0, 1.0);
-    freq *= 2.11;
-    amp *= 0.5;
-  }
-  return sum;
-}
-
-float terrainH(vec2 p) {
-  float ranges  = ridged3(p * 0.0055 + vec2(37.2, 11.9), 2.30) * 150.0;
-  float spurs   = ridged3(p * 0.0180 + vec2(-8.4, 5.1), 1.60) * 26.0;
-  float shelves = fbm2(p * 0.0040 + vec2(90.3, -44.7)) * 8.0;
-  float grain   = vnoise(p * 0.33) * 1.1;
-  return ranges + spurs + shelves + grain - 38.0;
-}
-
-float terrainD(vec3 p) { return p.y - terrainH(p.xz); }
-
-vec3 terrainNormal(vec3 p, float t) {
-  float e = max(0.020, t * 0.0040);
-  float hx = terrainH(p.xz + vec2(e, 0.0));
-  float hz = terrainH(p.xz + vec2(0.0, e));
-  return normalize(vec3(p.y - hx, e, p.y - hz));
-}
-
-float marchTerrain(vec3 ro, vec3 rd, float tMax, int budget) {
-  float t = 0.12;
-  for (int i = 0; i < 240; i++) {
-    if (i >= budget) break;
-    float d = terrainD(ro + rd * t);
-    float dt = max(0.008 * t, d * 0.62);
-    if (d < dt * 0.85) return t;
-    t += dt;
-    if (t > tMax) break;
-  }
-  return -1.0;
-}
-
-float mistDepth(vec3 ro, vec3 rd, float tMax) {
-  if (tMax <= 0.0) return 0.0;
-  float yEnd = ro.y + rd.y * tMax;
-  if (min(ro.y, yEnd) > 80.0) return 0.0;
-
-  float acc = 0.0;
-  float prev = 0.0;
-  for (int i = 1; i <= 14; i++) {
-    float f = float(i) / 14.0;
-    float t = tMax * f * f;
-    float dt = t - prev;
-    vec3 p = ro + rd * t;
-    float band = 1.0 - smoothstep(4.0, 78.0, p.y);
-    if (band > 0.003) {
-      float body = fbm2(p.xz * 0.0125 + vec2(uTime * 0.010, uTime * 0.004));
-      acc += band * smoothstep(0.26, 0.74, body) * dt;
-    }
-    prev = t;
-  }
-  return acc;
-}
-
-vec3 skyTone(vec3 rd) {
-  float y = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
-  vec3 col = mix(PAPER, vec3(0.874, 0.886, 0.902), smoothstep(0.50, 1.0, y) * 0.30);
-
-  float disc = dot(rd, MOON_DIR);
-  col = mix(col, vec3(0.996, 0.994, 0.982), smoothstep(0.99930, 0.99972, disc));
-  col = mix(col, vec3(0.886, 0.888, 0.878), smoothstep(0.99820, 0.99930, disc) * 0.50);
-
-  float cloud = smoothstep(0.008, 0.16, rd.y) * (1.0 - smoothstep(0.26, 0.78, rd.y));
-  if (cloud > 0.004) {
-    vec2 cuv = rd.xz / (rd.y + 0.34);
-    float wash = fbm3(cuv * 0.115 + vec2(uTime * 0.008, uTime * 0.003));
-    float streak = fbm2(cuv * vec2(0.055, 0.20) + vec2(uTime * 0.013, 0.0));
-    col = mix(col, INK, smoothstep(0.42, 0.86, wash) * 0.17 * cloud);
-    col = mix(col, INK, smoothstep(0.52, 0.92, streak) * 0.09 * cloud);
-  }
-  return col;
-}
-
-float inkTone(vec3 p, vec3 n, vec3 rd, float t) {
-  float slope = 1.0 - n.y;
-  float rock = smoothstep(0.025, 0.30, slope);
-
-  float key = clamp(dot(n, normalize(vec3(-0.42, 0.58, 0.70))) * 0.5 + 0.5, 0.0, 1.0);
-  float ink = mix(0.045, 0.740, rock);
-  ink *= 0.54 + 0.46 * key;
-
-  vec2 tangent = vec2(-n.z, n.x);
-  float tl = length(tangent);
-  tangent = tl > 1.0e-3 ? tangent / tl : vec2(1.0, 0.0);
-  float along = dot(p.xz, tangent);
-
-  float hemp = fbm3(vec2(along * 0.26, p.y * 0.048));
-  ink += (hemp - 0.5) * 0.30 * rock;
-  float fine = fbm2(vec2(along * 0.70 + p.y * 0.03, p.y * 0.11));
-  ink += (fine - 0.5) * 0.16 * rock;
-
-  float accent = smoothstep(0.74, 0.97, fbm3(vec2(along * 0.12, p.y * 0.026) + 3.1));
-  ink += accent * 0.13 * rock;
-
-  float crevice = clamp((terrainH(p.xz + n.xz * 5.0) - p.y) * 0.42, 0.0, 1.0);
-  ink *= 1.0 - crevice * 0.40;
-
-  float rim = pow(clamp(1.0 + dot(n, rd), 0.0, 1.0), 3.0);
-  ink *= 1.0 - rim * 0.16;
-
-  ink *= 1.0 - smoothstep(60.0, 430.0, t) * 0.66;
-
-  float levels = 6.0;
-  float dither = (hash21(gl_FragCoord.xy) - 0.5) * (0.9 / levels);
-  ink = mix(ink, floor(clamp(ink, 0.0, 0.999) * levels + 0.5) / levels, 0.20);
-  return clamp(ink + dither, 0.0, 1.0);
-}
-
-float flockInk(vec3 ro, vec3 rd) {
-  float alt = 96.0;
-  if (rd.y < 0.015) return 0.0;
-  float t = (alt - ro.y) / rd.y;
-  if (t <= 0.0 || t > 3000.0) return 0.0;
-
-  float cycle = 41.0;
-  float slot = floor(uTime / cycle);
-  float local = mod(uTime, cycle) / cycle;
-  float strength = smoothstep(0.0, 0.10, local) * (1.0 - smoothstep(0.58, 0.94, local));
-  if (strength <= 0.001) return 0.0;
-
-  float dir = mod(slot, 2.0) < 1.0 ? 1.0 : -1.0;
-  vec2 centre = vec2(dir * (local - 0.5) * 900.0, 40.0 + slot * 53.0);
-
-  vec2 hit = (ro + rd * t).xz - centre;
-  float ink = 0.0;
-  for (int i = 0; i < 9; i++) {
-    float fi = float(i);
-    float rank = floor(fi * 0.5);
-    float side = mod(fi, 2.0) < 0.5 ? -1.0 : 1.0;
-    vec2 pos = vec2(-side * rank * 11.0 - dir * rank * 4.0, side * rank * 6.0);
-    vec2 q = hit - pos;
-    float span = 3.4 + rank * 0.5;
-    float u = clamp(q.x / span, -1.0, 1.0);
-    float curve = 0.34 * span * (1.0 - u * u)
-                + 0.22 * span * sin(uTime * (7.2 - rank * 0.3) + fi * 1.7) * abs(u);
-    float d = abs(q.y - curve);
-    float th = span * 0.075;
-    float body = smoothstep(th, th * 0.18, d) * step(abs(q.x), span);
-    ink = max(ink, body);
-  }
-  return ink * strength;
+float potential(vec2 p, float t) {
+  return vnoise(p * 1.55 + vec2(t * 0.035, -t * 0.021)) * 0.72
+       + vnoise(p * 3.40 - vec2(t * 0.052, t * 0.013)) * 0.28;
 }
 
 void main() {
-  vec2 frag = gl_FragCoord.xy;
-  vec2 uv = frag / uRes;
-  float aspect = uRes.x / uRes.y;
-  vec2 p = (frag - 0.5 * uRes) / uRes.y;
+  vec2 p = vUv * uScale;
+  float t = uTime;
+  const float e = 0.055;
+  float a = potential(p + vec2(0.0, e), t);
+  float b = potential(p - vec2(0.0, e), t);
+  float c = potential(p + vec2(e, 0.0), t);
+  float d = potential(p - vec2(e, 0.0), t);
+  vec2 curl = vec2(a - b, -(c - d)) / (2.0 * e);
+  curl = clamp(curl * 0.42, vec2(-1.0), vec2(1.0));
+  fragColor = vec4(curl * 0.5 + 0.5, 0.0, 1.0);
+}`;
 
-  vec3 ro = uCamPos;
-  vec3 rd = normalize(p.x * uCamRight + p.y * uCamUp + 1.25 * uCamFwd);
+/**
+ * One diffusion step. State is (water, ink) in r/g.
+ *
+ * The three behaviours that make ink read as ink rather than as a blurred blob:
+ * pigment is carried by the flow while the paper is wet but stops once dry; ink bleeds
+ * into wet neighbours faster than it diffuses into dry ones; and the wet boundary
+ * concentrates pigment into a darker rim — the coffee-ring edge that every real ink
+ * wash on damp paper has.
+ */
+export const SIM = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
 
-  float bobAmt = clamp(uSpeed / 90.0, 0.0, 1.0);
-  rd = normalize(rd + uCamRight * sin(uTime * 8.4) * 0.0022 * bobAmt
-                   + uCamUp * sin(uTime * 13.1) * 0.0016 * bobAmt);
+uniform sampler2D uPrev;
+uniform sampler2D uFlow;
+uniform vec2 uTexel;
+uniform vec2 uAspect;
+uniform float uDt;
+uniform float uTime;
+uniform float uWash;
+uniform int uCount;
+uniform vec4 uStamp[6];
+uniform vec4 uStampDir[6];
 
-  vec3 col = skyTone(rd);
+float hash21(vec2 p) {
+  p = fract(p * vec2(127.1, 311.7));
+  p += dot(p, p + 34.53);
+  return fract(p.x * p.y);
+}
 
-  float tWater = 1.0e9;
-  if (rd.y < -0.0005 && ro.y > 0.0) tWater = -ro.y / rd.y;
-  float tLimit = min(uFar, tWater);
+float vnoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
 
-  float tHit = marchTerrain(ro, rd, tLimit, int(uSteps));
-  float mist = mistDepth(ro, rd, tHit > 0.0 ? tHit : tLimit);
+void main() {
+  vec2 uv = vUv;
+  vec2 aspect = uAspect;
 
-  if (tHit > 0.0) {
-    vec3 pos = ro + rd * tHit;
-    vec3 nrm = terrainNormal(pos, tHit);
-    float ink = inkTone(pos, nrm, rd, tHit);
-    float far = tHit / uFar;
-    float aerial = 1.0 - exp(-far * far * 4.0);
-    float trans = exp(-mist * 0.0125) * (1.0 - aerial * 0.92);
-    col = mix(col, mix(INK, PAPER, ink), trans);
+  float paper = 0.55 + 0.45 * vnoise(uv * vec2(180.0, 150.0));
+  float fibre = 0.62 + 0.38 * vnoise(uv * vec2(14.0, 96.0) + 3.1);
+
+  vec2 flow = texture(uFlow, uv).xy * 2.0 - 1.0;
+  vec2 src = uv - flow * uDt * 0.0075;
+
+  vec4 c = texture(uPrev, src);
+  vec4 l = texture(uPrev, src - vec2(uTexel.x, 0.0));
+  vec4 r = texture(uPrev, src + vec2(uTexel.x, 0.0));
+  vec4 d = texture(uPrev, src - vec2(0.0, uTexel.y));
+  vec4 u = texture(uPrev, src + vec2(0.0, uTexel.y));
+
+  vec4 blur = (c * 2.0 + l + r + d + u) / 6.0;
+
+  float wetness = mix(c.r, blur.r, 0.022 * uDt * 60.0 * paper * fibre);
+  float pigment = c.g;
+
+  float wetNeighbours = (l.r + r.r + d.r + u.r) * 0.25;
+  float wetnessMix = clamp(wetNeighbours * 2.2, 0.0, 1.0);
+  float bleed = mix(0.0007, 0.0038, wetnessMix) * uDt * 60.0 * paper;
+  pigment = mix(pigment, blur.g, clamp(bleed, 0.0, 0.6));
+
+  float rim = length(vec2(r.r - l.r, u.r - d.r));
+  pigment += rim * 0.030 * uDt * 60.0 * fibre;
+
+  wetness -= uDt * 60.0 * 0.0060 * mix(0.7, 1.25, 1.0 - fibre);
+  wetness = max(wetness, 0.0);
+
+  pigment -= uDt * 60.0 * 0.00028 * mix(0.55, 1.0, wetness > 0.02 ? 1.0 : 0.0);
+  pigment *= 1.0 - uDt * 60.0 * 0.00016 * uWash;
+
+  for (int i = 0; i < 6; i++) {
+    if (i >= uCount) break;
+    vec4 s = uStamp[i];
+    vec4 sd = uStampDir[i];
+    vec2 q = (uv - s.xy) * aspect;
+
+    vec2 dir = sd.xy;
+    float dl = length(dir);
+    dir = dl > 1.0e-4 ? dir / dl : vec2(1.0, 0.0);
+    float along = dot(q, dir);
+    float across = dot(q, vec2(-dir.y, dir.x));
+    float stretch = max(1.0, sd.w);
+    float e = length(vec2(along / stretch, across));
+    float body = smoothstep(s.z, s.z * 0.16, e);
+
+    float streak = vnoise(q * 5.2 + dir * 1.4);
+    float dry = sd.z;
+    float flying = mix(1.0, smoothstep(0.28, 0.76, streak), dry);
+
+    wetness += body * s.w * 1.10 * flying;
+    pigment += body * s.w * 1.30 * flying;
   }
 
-  if (rd.y < -0.0005 && ro.y > 0.0) {
-    vec2 wp = ro.xz + rd.xz * tWater;
-    float fres = pow(clamp(1.0 + rd.y, 0.0, 1.0), 2.2);
-    float near = smoothstep(0.0, 18.0, tWater);
-    float mid = smoothstep(18.0, 90.0, tWater);
-    float detail = 1.0 - smoothstep(90.0, 380.0, tWater);
+  fragColor = vec4(clamp(wetness, 0.0, 2.0), clamp(pigment, 0.0, 2.0), 0.0, 1.0);
+}`;
 
-    vec3 refl = skyTone(rd);
-    float rFade = 0.0;
-    if (tWater < 900.0 && fres > 0.02) {
-      float ripple = fbm3(wp * 0.16 + vec2(uTime * 0.05, uTime * 0.021));
-      vec3 rr = normalize(reflect(rd, normalize(vec3(
-        (ripple - 0.5) * 0.15, 1.0, (fbm2(wp * 0.12) - 0.5) * 0.11))));
-      refl = skyTone(rr);
-      float rHit = marchTerrain(ro + vec3(0.0, 0.02, 0.0), rr, 820.0, int(uSteps * 0.62));
-      if (rHit > 0.0) {
-        vec3 rp = ro + rr * rHit;
-        vec3 rn = terrainNormal(rp, rHit);
-        float rInk = inkTone(rp, rn, rr, rHit);
-        refl = mix(INK, PAPER, clamp(rInk * 0.94 + 0.06, 0.0, 1.0));
-        rFade = 1.0 - smoothstep(90.0, 760.0, rHit) * 0.90;
-      }
-    }
+/**
+ * Paper plus ink. Ink tone is a saturating curve, not linear alpha, and the hue shifts
+ * from warm grey in the pale washes to blue-black in the dense passages — which is how
+ * 墨分五色 actually behaves on sized paper.
+ */
+export const DRAW = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
 
-    float washInk = mix(0.012, 0.155, fres);
-    if (detail > 0.01) {
-      float lines = smoothstep(0.93, 1.0, sin(wp.x * 0.030 + fbm3(wp * 0.042) * 3.0));
-      lines *= smoothstep(0.50, 0.78, fbm3(wp * vec2(0.014, 0.07) + 7.3));
-      lines *= smoothstep(2.5, 40.0, tWater) * (1.0 - smoothstep(70.0, 190.0, tWater) * 0.7);
-      washInk += lines * 0.20 * detail;
-      washInk += smoothstep(0.93, 1.0, fbm2(wp * 0.05 + vec2(uTime * 0.02, 0.0))) * 0.035 * detail;
-    }
+uniform sampler2D uState;
+uniform vec2 uRes;
+uniform float uTime;
+uniform float uIntro;
 
-    float surfaceInk = clamp(mix(washInk, 0.045 + 0.215 * fres, 0.68) * near
-                           + fres * 0.15 * mid, 0.0, 1.0);
-    vec3 water = mix(INK, PAPER, 1.0 - surfaceInk);
-    water = mix(water, refl, clamp(fres * 0.80 + 0.14, 0.0, 1.0) * rFade);
-    water = mix(water, PAPER, (1.0 - exp(-tWater * 0.0021)) * 0.55 + mist * 0.005);
-    water = mix(water, skyTone(rd), 1.0 - exp(-tWater * 0.0032));
-    col = water;
-  }
+const vec3 PAPER = vec3(0.945, 0.929, 0.898);
 
-  col = mix(col, PAPER, clamp(1.0 - exp(-mist * 0.0125), 0.0, 1.0) * 0.26);
+float hash21(vec2 p) {
+  p = fract(p * vec2(127.1, 311.7));
+  p += dot(p, p + 34.53);
+  return fract(p.x * p.y);
+}
 
-  col = mix(col, INK, flockInk(ro, rd) * 0.85);
+float vnoise(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float a = hash21(i);
+  float b = hash21(i + vec2(1.0, 0.0));
+  float c = hash21(i + vec2(0.0, 1.0));
+  float d = hash21(i + vec2(1.0, 1.0));
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
 
-  if (uReveal < 0.999) {
-    float front = fbm3(uv * 2.15 + vec2(0.0, -uReveal * 1.35) + 4.7);
-    float m = uReveal * 2.25 - front * 0.92;
-    float halo = smoothstep(-0.02, 0.14, m) * (1.0 - smoothstep(0.14, 0.40, m));
-    col = mix(col, INK, clamp(halo, 0.0, 1.0) * 0.55 * step(0.001, uReveal));
-    col = mix(PAPER, col, smoothstep(0.0, 0.26, m));
-  }
+void main() {
+  vec2 uv = vUv;
+  vec2 frag = vUv * uRes;
 
-  float fibre = vnoise(vec2(frag.x * 0.72, frag.y * 0.055)) * 0.020
-              + vnoise(vec2(frag.x * 0.048, frag.y * 0.80)) * 0.016;
-  col += fibre - 0.018;
-  col += (hash21(frag + uTime) - 0.5) * 0.012;
+  float mottle = vnoise(uv * vec2(5.0, 4.0) + 11.0);
+  float tooth  = vnoise(uv * vec2(320.0, 260.0));
+  float fibre  = vnoise(vec2(frag.x * 0.62, frag.y * 0.045));
+
+  vec3 paper = PAPER;
+  paper *= 0.975 + 0.050 * mottle;
+  paper *= 0.982 + 0.036 * tooth;
+  paper += (fibre - 0.5) * 0.014;
+
+  vec2 s = texture(uState, uv).xy;
+  float pigment = s.y;
+  float wetness = s.x;
+
+  float tone = 1.0 - exp(-pigment * 2.35);
+
+  vec3 paleInk  = vec3(0.545, 0.545, 0.552);
+  vec3 midInk   = vec3(0.223, 0.235, 0.262);
+  vec3 deepInk  = vec3(0.055, 0.066, 0.086);
+  vec3 ink = mix(paleInk, midInk, smoothstep(0.04, 0.42, tone));
+  ink = mix(ink, deepInk, smoothstep(0.40, 0.92, tone));
+
+  vec3 col = mix(paper, ink, tone);
+
+  float granulation = vnoise(uv * 46.0 + 5.0) - 0.5;
+  col = mix(col, col * (1.0 + granulation * 0.14), tone * 0.85);
+
+  col = mix(col, paper * 1.012, clamp(wetness, 0.0, 1.0) * 0.20);
+
+  float bloom = smoothstep(0.02, 0.55, pigment);
+  col = mix(col, col * vec3(0.985, 0.99, 1.005), bloom * 0.5);
 
   vec2 q = uv - 0.5;
-  col *= 1.0 - dot(q, q) * 0.26;
-  col = clamp(col, 0.0, 1.0);
+  col *= 1.0 - dot(q, q) * 0.22;
 
-  float inkMask = smoothstep(0.58, 0.0, dot(col, vec3(0.333)));
-  fragColor = vec4(mix(col, CINNABAR, inkMask * 0.020), 1.0);
+  col += (hash21(frag + uTime) - 0.5) * 0.010;
+
+  float m = smoothstep(0.0, 0.30, uIntro);
+  float front = vnoise(uv * 2.4 + vec2(0.0, -uIntro * 1.4) + 7.3);
+  float halo = smoothstep(-0.03, 0.12, uIntro * 2.2 - front * 0.9)
+             * (1.0 - smoothstep(0.12, 0.38, uIntro * 2.2 - front * 0.9));
+  col = mix(col, vec3(0.08, 0.09, 0.11), clamp(halo, 0.0, 1.0) * 0.30 * step(0.001, uIntro));
+  col = mix(paper, col, m);
+
+  fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }`;

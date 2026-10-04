@@ -4,14 +4,14 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>千山 · A Thousand Mountains</title>
-<meta name="description" content="可以一路向下走的水墨山水。滚动即是行旅,没有尽头。">
-<meta name="theme-color" content="#f2eee5">
+<meta name="description" content="会自己晕开的水墨。滚动即是时间,没有尽头。">
+<meta name="theme-color" content="#f1ece2">
 <link rel="stylesheet" href="./style.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f2eee5'/%3E%3Cpath d='M4 24 L13 9 L20 20 L24 15 L28 24 Z' fill='%23141719'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f1ece2'/%3E%3Ccircle cx='16' cy='16' r='7' fill='%23141719'/%3E%3C/svg%3E">
 </head>
 <body>
 
-<canvas id="scene" aria-label="水墨山水实时渲染画面"></canvas>
+<canvas id="scene" aria-label="水墨渗染实时模拟"></canvas>
 
 <div id="fallback" hidden>
   <p>此作品需要 WebGL2 支持。请使用较新的浏览器打开。</p>
@@ -20,7 +20,7 @@
 <header class="brand">
   <span class="brand__zh">千山</span>
   <span class="brand__rule"></span>
-  <span class="brand__en">A&nbsp;Thousand&nbsp;Mountains</span>
+  <span class="brand__en">Ink&nbsp;in&nbsp;Water</span>
 </header>
 
 <aside class="seal" aria-hidden="true"><span>云深</span></aside>
@@ -30,20 +30,23 @@
   <p class="inscription__src"></p>
 </div>
 
-<button id="scroll-cue" type="button" aria-label="开始行旅">
+<button id="scroll-cue" type="button" aria-label="开始">
   <span class="scroll-cue__label">向下</span>
   <span class="scroll-cue__line"></span>
 </button>
 
 <footer class="colophon">
-  <p class="colophon__tech">实时光线步进渲染 · 无贴图 · WebGL2</p>
+  <p class="colophon__tech">渗染实时模拟 · 无贴图 · WebGL2</p>
   <p class="colophon__odo">行 <span id="odo">0</span> 里</p>
 </footer>
 
-<button id="audio-toggle" type="button" aria-pressed="false" aria-label="开启乐声">
-  <span class="audio-glyph" aria-hidden="true"></span>
-  <span class="audio-label">乐声</span>
-</button>
+<div class="tools">
+  <button id="grind" type="button" title="洗去重画">研墨</button>
+  <button id="audio-toggle" type="button" aria-pressed="false" aria-label="开启乐声">
+    <span class="audio-glyph" aria-hidden="true"></span>
+    <span class="audio-label">乐声</span>
+  </button>
+</div>
 
 <div id="scroll-spacer" aria-hidden="true"></div>
 

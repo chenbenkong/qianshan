@@ -1,7 +1,7 @@
-﻿import { VERT, FRAG } from "./shader.js";
+﻿import { VERT, FLOW, SIM, DRAW } from "./shader.js";
 import { createScore } from "./audio.js";
-import { terrainH } from "./field.js";
 import { COUPLETS } from "./verses.js";
+import { makePainting, clamp } from "./strokes.js";
 
 const canvas = document.getElementById("scene");
 const spacer = document.getElementById("scroll-spacer");
@@ -13,7 +13,6 @@ const gl = canvas.getContext("webgl2", {
   antialias: false,
   depth: false,
   stencil: false,
-  powerPreference: "high-performance",
   preserveDrawingBuffer: false,
 });
 
@@ -22,108 +21,135 @@ if (!gl) {
   throw new Error("WebGL2 unavailable");
 }
 
+const floatRender = !!gl.getExtension("EXT_color_buffer_float");
+const stateFormat = floatRender ? gl.RGBA16F : gl.RGBA8;
+const stateType = floatRender ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+
 function compile(type, source) {
   const shader = gl.createShader(type);
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-    const log = gl.getShaderInfoLog(shader);
     const numbered = source
       .split("\n")
       .map((line, i) => `${String(i + 1).padStart(4)} | ${line}`)
       .join("\n");
-    throw new Error(`shader compile failed\n${log}\n${numbered}`);
+    throw new Error(`compile failed\n${gl.getShaderInfoLog(shader)}\n${numbered}`);
   }
   return shader;
 }
 
-const program = gl.createProgram();
-gl.attachShader(program, compile(gl.VERTEX_SHADER, VERT));
-gl.attachShader(program, compile(gl.FRAGMENT_SHADER, FRAG));
-gl.linkProgram(program);
-if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-  throw new Error(`link failed: ${gl.getProgramInfoLog(program)}`);
-}
-gl.useProgram(program);
-gl.bindVertexArray(gl.createVertexArray());
-
-const uniforms = {};
-for (const name of [
-  "uRes", "uTime", "uCamPos", "uCamRight", "uCamUp", "uCamFwd",
-  "uSpeed", "uReveal", "uSteps", "uFar",
-]) {
-  uniforms[name] = gl.getUniformLocation(program, name);
+function link(fragSource) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VERT));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fragSource));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error(`link failed: ${gl.getProgramInfoLog(p)}`);
+  }
+  return p;
 }
 
-const dpr = window.devicePixelRatio || 1;
-const forced = new URLSearchParams(location.search).get("q");
-const PROFILES = {
-  high: { steps: 220, budget: 4.0e6 },
-  medium: { steps: 150, budget: 2.2e6 },
-  low: { steps: 84, budget: 0.8e6 },
+const progFlow = link(FLOW);
+const progSim = link(SIM);
+const progDraw = link(DRAW);
+const vao = gl.createVertexArray();
+gl.bindVertexArray(vao);
+
+const uni = (prog, names) => {
+  const out = {};
+  for (const n of names) out[n] = gl.getUniformLocation(prog, n);
+  return out;
 };
-const profile = PROFILES[forced] || { steps: 190, budget: 2.4e6 };
 
-/**
- * Steps are a quality knob here, not a throttle.
- *
- * Measured on the target iGPU at a fixed resolution, 62 / 116 / 150 steps all ran at the
- * same frame rate — the cost is per-pixel work unrelated to step count. So the floor sits
- * at 80% of the profile: low step counts do not buy frames, but they do destroy the image,
- * because rays grazing along a hillside cannot converge and overshoot whole ridges.
- */
-const FLOOR_STEPS = Math.round(profile.steps * 0.8);
-let steps = profile.steps;
-const maxSteps = profile.steps;
-let budget = profile.budget;
-let minScale = 0.45;
-let frameBudget = 16.7;
+const uFlow = uni(progFlow, ["uTime", "uScale"]);
+const uSim = uni(progSim, [
+  "uPrev", "uFlow", "uTexel", "uAspect", "uDt", "uTime",
+  "uWash", "uCount", "uStamp[0]", "uStampDir[0]",
+]);
+const uDraw = uni(progDraw, ["uState", "uRes", "uTime", "uIntro"]);
 
-const pinned = Number(new URLSearchParams(location.search).get("px"));
-if (pinned > 0) {
-  budget = pinned;
-  minScale = 1;
+const FLOW_RES = 176;
+const flowTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, flowTex);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, FLOW_RES, FLOW_RES, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+const flowFbo = gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER, flowFbo);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, flowTex, 0);
+
+function makeStateTarget() {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, stateFormat, 2, 2, 0, gl.RGBA, stateType, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.viewport(0, 0, 2, 2);
+  gl.clearColor(0, 0, 0, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  return { tex, fbo };
 }
 
-const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+let state = [makeStateTarget(), makeStateTarget()];
+let front = 0;
 
-function ceiling() {
-  return Math.max(
-    minScale,
-    Math.min(dpr * 1.25, Math.sqrt(budget / Math.max(1, window.innerWidth * window.innerHeight))),
-  );
+let simW = 2;
+let simH = 2;
+let simScale = 0.5;
+let renderScale = Math.min(window.devicePixelRatio || 1, 1.4);
+
+function sizeTargets() {
+  const w = Math.max(2, Math.round(window.innerWidth * simScale));
+  const h = Math.max(2, Math.round(window.innerHeight * simScale));
+  if (w === simW && h === simH) return;
+  simW = w;
+  simH = h;
+  for (const s of state) {
+    gl.bindTexture(gl.TEXTURE_2D, s.tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, stateFormat, w, h, 0, gl.RGBA, stateType, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, s.fbo);
+    gl.viewport(0, 0, w, h);
+    gl.clearColor(0, 0, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
 }
 
-let scale = 1;
+function drawFullscreen() {
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
 
 function resize() {
-  const w = Math.max(1, Math.round(window.innerWidth * scale));
-  const h = Math.max(1, Math.round(window.innerHeight * scale));
+  const w = Math.max(1, Math.round(window.innerWidth * renderScale));
+  const h = Math.max(1, Math.round(window.innerHeight * renderScale));
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
   }
+  sizeTargets();
 }
 
-window.addEventListener("resize", () => {
-  scale = Math.min(scale, ceiling());
-  resize();
-}, { passive: true });
+window.addEventListener("resize", resize, { passive: true });
 
-/* ── 无限行旅 ─────────────────────────────────── */
+/* ── 时间与画卷 ───────────────────────────────── */
 
-/**
- * The scrollbar is not a position, it is a throttle.
- *
- * The page is a six-screen spacer. Scrolling accumulates the delta into `virtual`, then
- * the scroll position is snapped back to the middle. Because the shader and the odometer
- * both read `virtual`, the snap is invisible — the bar sits still while the mountains
- * keep going.
- */
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 let scrollSpan = 1;
 let virtual = 0;
 let lastY = 0;
-let travel = 0;
+let velocity = 0;
+let smoothBoost = 0;
+let clock = 0;
+let reveal = 0;
+let odometer = 0;
 
 function layout() {
   scrollSpan = Math.max(1, window.innerHeight * 6);
@@ -131,93 +157,48 @@ function layout() {
   lastY = window.scrollY;
 }
 
-function center() {
+function centerScroll() {
   const mid = scrollSpan * 0.5;
   window.scrollTo(0, mid);
   lastY = mid;
 }
 
-function onScroll() {
+window.addEventListener("scroll", () => {
   const y = window.scrollY;
-  virtual += y - lastY;
+  const delta = y - lastY;
   lastY = y;
-  if (virtual < 0) virtual = 0;
-  if (y < scrollSpan * 0.2 || y > scrollSpan * 0.8) center();
+  velocity = clamp(velocity * 0.72 + Math.abs(delta) * 0.5, 0, 260);
+  if (delta < 0) virtual = Math.max(0, virtual + delta);
+  else virtual += delta;
+  if (y < scrollSpan * 0.2 || y > scrollSpan * 0.8) centerScroll();
+}, { passive: true });
+
+let painting = makePainting(20260917);
+let genStart = 0;
+let genIndex = 0;
+let wash = 0;
+let wiping = false;
+
+function advanceGeneration(now) {
+  genIndex++;
+  painting = makePainting(1000 + genIndex * 7919);
+  genStart = now;
+  wiping = false;
+  wash = 0;
 }
 
-window.addEventListener("scroll", onScroll, { passive: true });
-
-/* ── 镜头 ─────────────────────────────────────── */
-
-const cam = { x: 0, y: 30, z: 0 };
-const basis = { fwd: { x: 0, y: 0, z: -1 }, right: { x: 1, y: 0, z: 0 }, up: { x: 0, y: 1, z: 0 } };
-
-/**
- * Routes the camera along bays and shorelines instead of into headlands.
- *
- * A low camera gives the composition that works — horizon in the lower third, peaks
- * towering, mist pooling in the valleys — but a straight -z path ploughs into a range
- * every so often and fills the frame with rock. Rather than climb above the terrain (which
- * puts the eye over the cloud deck, so everything reads as white), the route is steered
- * laterally toward whichever side has lower ground ahead. The corridor average is sampled
- * over a 700-unit lookahead, so the decision is made well before the obstruction.
- */
-function corridor(x, z) {
-  let sum = 0;
-  for (let d = 100; d <= 700; d += 100) sum += terrainH(x, z - d);
-  return sum / 7;
-}
-
-let guideX = 0;
-
-function placeCamera(clock, dt) {
-  const bobY = Math.sin(clock * 0.21) * 0.5 + Math.sin(clock * 0.083) * 0.9;
-  const bobX = Math.sin(clock * 0.147) * 0.8;
-
-  cam.z = -travel;
-
-  const left = corridor(cam.x - 95, cam.z);
-  const right = corridor(cam.x + 95, cam.z);
-  const bias = Math.max(-1, Math.min(1, (left - right) / 26));
-  guideX += bias * 34 * dt - guideX * 0.05 * dt;
-  guideX = Math.max(-190, Math.min(190, guideX));
-
-  cam.x = guideX + bobX;
-  cam.y = 17 + Math.sin(travel * 0.0052) * 6 + bobY;
-
-  const floor = terrainH(cam.x, cam.z) + 7.0;
-  if (cam.y < floor) cam.y = floor;
-
-  const yaw = Math.sin(travel * 0.0037) * 0.15 + Math.sin(clock * 0.043) * 0.045;
-  const pitch = 0.075 + Math.sin(travel * 0.0043) * 0.04 + Math.sin(clock * 0.031) * 0.010;
-
-  const cp = Math.cos(pitch);
-  const cy = Math.cos(yaw);
-  const sy = Math.sin(yaw);
-
-  basis.fwd.x = sy * cp;
-  basis.fwd.y = Math.sin(pitch);
-  basis.fwd.z = -cy * cp;
-  basis.right.x = cy;
-  basis.right.y = 0;
-  basis.right.z = sy;
-  basis.up.x = basis.right.y * basis.fwd.z - basis.right.z * basis.fwd.y;
-  basis.up.y = basis.right.z * basis.fwd.x - basis.right.x * basis.fwd.z;
-  basis.up.z = basis.right.x * basis.fwd.y - basis.right.y * basis.fwd.x;
-}
-
-/* ── 里程与题字 ───────────────────────────────── */
+/* ── 题字 ─────────────────────────────────────── */
 
 let lastOdo = -1;
 let lastVerse = -1;
 
-function refreshReadouts(speed) {
-  const odo = Math.floor(travel * 0.5);
+function refreshReadouts() {
+  const odo = Math.floor(odometer);
   if (odo !== lastOdo) {
     lastOdo = odo;
     odoOut.textContent = odo.toLocaleString("en-US");
   }
-  const vi = Math.floor(travel / 620);
+  const vi = Math.floor(odometer / 620);
   if (vi !== lastVerse) {
     lastVerse = vi;
     const c = COUPLETS[vi % COUPLETS.length];
@@ -227,7 +208,6 @@ function refreshReadouts(speed) {
     void inscription.offsetWidth;
     inscription.classList.add("is-in");
   }
-  canvas.style.setProperty("--bob", Math.min(1, speed / 90).toFixed(3));
 }
 
 /* ── 乐声 ─────────────────────────────────────── */
@@ -249,102 +229,173 @@ async function turnOn() {
   paintAudio(ok);
 }
 
-function turnOff() {
-  score.disable();
-  try { localStorage.setItem("qianshan-audio", "off"); } catch {}
-  paintAudio(false);
-}
-
 audioButton.addEventListener("click", (e) => {
   e.stopPropagation();
-  if (score.playing) turnOff();
-  else turnOn();
+  if (score.playing) {
+    score.disable();
+    try { localStorage.setItem("qianshan-audio", "off"); } catch {}
+    paintAudio(false);
+  } else {
+    turnOn();
+  }
 });
 
-let stored = null;
-try { stored = localStorage.getItem("qianshan-audio"); } catch {}
+try {
+  if (localStorage.getItem("qianshan-audio") === "off") paintAudio(false);
+} catch {}
 
-if (stored !== "off") {
-  const arm = () => {
-    turnOn();
-    for (const type of ["pointerdown", "keydown", "touchstart"]) {
-      window.removeEventListener(type, arm);
-    }
-  };
-  for (const type of ["pointerdown", "keydown", "touchstart"]) {
-    window.addEventListener(type, arm, { passive: true });
-  }
-}
+document.getElementById("grind")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  wiping = true;
+});
 
 /* ── 主循环 ───────────────────────────────────── */
 
-const introStarted = performance.now();
+const MAX_STAMPS = 6;
+const stampData = new Float32Array(MAX_STAMPS * 4);
+const stampDir = new Float32Array(MAX_STAMPS * 4);
+const scratch = { x: 0, y: 0, w: 0, press: 0, dry: 0, load: 0.04 };
+const ahead = { x: 0, y: 0, w: 0, press: 0, dry: 0, load: 0.04 };
+
 let last = performance.now();
-let clock = 0;
-let speed = 0;
+let frameAvg = 16.7;
 
 function frame(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
+  const raw = (now - last) / 1000;
   last = now;
-  clock += dt;
+  const dt = Math.min(0.05, raw);
+  frameAvg += (raw * 1000 - frameAvg) * 0.08;
 
-  frameBudget += (dt * 1000 - frameBudget) * 0.06;
-  if (frameBudget > 26) {
-    if (steps > FLOOR_STEPS) steps = Math.max(FLOOR_STEPS, steps - 6);
-    if (scale > minScale) {
-      scale = Math.max(minScale, scale - 0.03);
-      resize();
-    }
-  } else if (frameBudget < 13) {
-    if (scale < ceiling()) {
-      scale = Math.min(ceiling(), scale + 0.02);
-      resize();
-    } else if (steps < maxSteps) {
-      steps = Math.min(maxSteps, steps + 2);
-    }
+  if (frameAvg > 34 && simScale > 0.3) {
+    simScale = Math.max(0.3, simScale - 0.05);
+    sizeTargets();
   }
 
-  const target = virtual * 0.55;
-  const before = travel;
-  travel += (target - travel) * (reduceMotion ? 1 : 1 - Math.pow(0.0022, dt));
-  speed = Math.abs(travel - before) / Math.max(dt, 1e-4);
+  velocity *= Math.pow(0.02, dt);
+  const targetBoost = reduceMotion ? 0 : clamp(velocity / 45, 0, 3.4);
+  smoothBoost += (targetBoost - smoothBoost) * (1 - Math.pow(0.02, dt));
 
-  placeCamera(clock, dt);
-
-  const reveal = reduceMotion ? 1 : Math.min(1, (now - introStarted) / 3400);
-
-  gl.viewport(0, 0, canvas.width, canvas.height);
-  gl.uniform2f(uniforms.uRes, canvas.width, canvas.height);
-  gl.uniform1f(uniforms.uTime, clock);
-  gl.uniform3f(uniforms.uCamPos, cam.x, cam.y, cam.z);
-  gl.uniform3f(uniforms.uCamRight, basis.right.x, basis.right.y, basis.right.z);
-  gl.uniform3f(uniforms.uCamUp, basis.up.x, basis.up.y, basis.up.z);
-  gl.uniform3f(uniforms.uCamFwd, basis.fwd.x, basis.fwd.y, basis.fwd.z);
-  gl.uniform1f(uniforms.uSpeed, speed);
-  gl.uniform1f(uniforms.uReveal, reveal);
-  gl.uniform1f(uniforms.uSteps, steps);
-  gl.uniform1f(uniforms.uFar, 380 + Math.min(cam.y, 240) * 3.2);
-  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const simDt = dt * (1 + smoothBoost);
+  clock += simDt;
+  odometer += simDt * 7.2;
+  reveal = reduceMotion ? 1 : Math.min(1, reveal + dt / 3.0);
 
   if (reveal >= 1 && !document.body.classList.contains("revealed")) {
     document.body.classList.add("revealed");
   }
 
+  const local = clock - genStart;
 
-  refreshReadouts(speed);
-  if (score.playing) score.setElevation(Math.max(0, Math.min(1, (cam.y - 20) / 320)));
+  if (!wiping && local > painting.span + 3.2) wiping = true;
 
+  let count = 0;
+  if (!wiping) {
+    for (const s of painting.strokes) {
+      if (count >= MAX_STAMPS) break;
+      if (local < s.t0 || local > s.t0 + s.dur) continue;
+      const u = (local - s.t0) / s.dur;
+      s.point(u, scratch);
+      s.point(Math.min(1, u + 0.03), ahead);
+      let dx = ahead.x - scratch.x;
+      let dy = ahead.y - scratch.y;
+      const dl = Math.hypot(dx, dy);
+      if (dl < 1.0e-5) {
+        dx = 1;
+        dy = 0;
+      } else {
+        dx /= dl;
+        dy /= dl;
+      }
+      const px = scratch.x + (count % 2 === 0 ? -0.0016 : 0.0016);
+      const py = scratch.y + (count % 3 === 0 ? 0.0012 : 0);
+      stampData[count * 4 + 0] = px;
+      stampData[count * 4 + 1] = 1 - py;
+      stampData[count * 4 + 2] = scratch.w;
+      stampData[count * 4 + 3] = scratch.press * scratch.load;
+      stampDir[count * 4 + 0] = dx;
+      stampDir[count * 4 + 1] = -dy;
+      stampDir[count * 4 + 2] = scratch.dry;
+      stampDir[count * 4 + 3] = s.kind === "wash" ? 1.5 : 3.4;
+      count++;
+    }
+  }
+
+  if (wiping) {
+    wash = Math.min(1, wash + dt * 0.55);
+    if (wash >= 1) {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, state[front].fbo);
+      gl.viewport(0, 0, simW, simH);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, state[1 - front].fbo);
+      gl.viewport(0, 0, simW, simH);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      advanceGeneration(clock);
+    }
+  }
+
+  const aspect = Math.max(simW / simH, 1);
+
+  gl.disable(gl.BLEND);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, flowFbo);
+  gl.viewport(0, 0, FLOW_RES, FLOW_RES);
+  gl.useProgram(progFlow);
+  gl.uniform1f(uFlow.uTime, clock);
+  gl.uniform2f(uFlow.uScale, aspect * 1.9, 1.9);
+  drawFullscreen();
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, state[1 - front].fbo);
+  gl.viewport(0, 0, simW, simH);
+  gl.useProgram(progSim);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, state[front].tex);
+  gl.uniform1i(uSim.uPrev, 0);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, flowTex);
+  gl.uniform1i(uSim.uFlow, 1);
+  gl.uniform2f(uSim.uTexel, 1 / simW, 1 / simH);
+  gl.uniform2f(uSim.uAspect, aspect, 1);
+  gl.uniform1f(uSim.uDt, Math.min(simDt, 0.05));
+  gl.uniform1f(uSim.uTime, clock);
+  gl.uniform1f(uSim.uWash, wash);
+  gl.uniform1i(uSim.uCount, count);
+  gl.uniform4fv(uSim["uStamp[0]"], stampData);
+  gl.uniform4fv(uSim["uStampDir[0]"], stampDir);
+  drawFullscreen();
+  front = 1 - front;
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.useProgram(progDraw);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, state[front].tex);
+  gl.uniform1i(uDraw.uState, 0);
+  gl.uniform2f(uDraw.uRes, canvas.width, canvas.height);
+  gl.uniform1f(uDraw.uTime, clock);
+  gl.uniform1f(uDraw.uIntro, reveal);
+  drawFullscreen();
+
+  if (score.playing) score.setElevation(clamp(0.5 + 0.5 * Math.sin(clock * 0.05), 0, 1));
+
+  refreshReadouts();
+  window.__dbg = {
+    clock: clock.toFixed(2),
+    local: local.toFixed(2),
+    span: painting.span.toFixed(2),
+    count,
+    kinds: painting.strokes.filter((s) => local >= s.t0 && local <= s.t0 + s.dur).map((s) => s.kind),
+    wipe: wiping,
+    wash: wash.toFixed(2),
+    sim: `${simW}x${simH}`,
+  };
   requestAnimationFrame(frame);
 }
 
 layout();
-scale = ceiling() * 0.7;
 resize();
 virtual = 0;
-center();
-refreshReadouts(0);
+centerScroll();
+genStart = 0;
 requestAnimationFrame(frame);
-
-document.getElementById("scroll-cue")?.addEventListener("click", () => {
-  window.scrollBy({ top: window.innerHeight * 0.9, behavior: "smooth" });
-});
